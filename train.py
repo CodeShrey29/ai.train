@@ -32,18 +32,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-# DirectML GPU support
-try:
-    import torch_directml
-    DIRECTML_AVAILABLE = True
-    print(f"[GPU] DirectML available — {torch_directml.device_count()} device(s) detected")
-    for i in range(torch_directml.device_count()):
-        print(f"  GPU {i}: {torch_directml.device_name(i)}")
-except ImportError:
-    DIRECTML_AVAILABLE = False
-    print("[Warning] torch-directml not installed — falling back to CPU")
-    print("  Install with: python -m pip install torch-directml")
-
 # Optional imports
 try:
     import psutil
@@ -65,7 +53,7 @@ except ImportError:
 # CONFIGURATION
 # =============================
 class ModelConfig:
-    # Batch sizes tuned for GPU (DirectML) — will auto-reduce on OOM
+    # Batch sizes tuned for GPU (CUDA) — will auto-reduce on OOM
     PRESETS = {
         "10M": {"hidden_dim": 512, "num_layers": 8, "num_heads": 8, "ffn_mult": 4, "batch_size": 2, "grad_accum": 8},
         "50M": {"hidden_dim": 768, "num_layers": 12, "num_heads": 12, "ffn_mult": 4, "batch_size": 8, "grad_accum": 2},
@@ -121,11 +109,8 @@ class ModelConfig:
         self.GROWTH_LOSS_THRESHOLD = 3.0
         self.GROWTH_STABLE_STEPS = 1000
 
-        # Device selection: DirectML (GPU) > CUDA > CPU
-        if DIRECTML_AVAILABLE:
-            self.DEVICE = torch_directml.device()
-            self.DEVICE_TYPE = "directml"
-        elif torch.cuda.is_available():
+        # Device selection: CUDA > CPU
+        if torch.cuda.is_available():
             self.DEVICE = torch.device("cuda")
             self.DEVICE_TYPE = "cuda"
         else:
@@ -898,11 +883,11 @@ class ModelGrowthManager:
                 return json.load(f)
         return []
     
-    def save_growth_log(self):
+def save_growth_log(self):
         with open(self.growth_log_file, 'w') as f:
             json.dump(self.growth_log, f, indent=2)
     
-    def should_grow(self, recent_losses):
+def should_grow(self, recent_losses):
         if self.current_size_idx >= len(ModelConfig.GROWTH_PATH) - 1:
             return False
         
@@ -912,7 +897,7 @@ class ModelGrowthManager:
         avg_loss = sum(recent_losses) / len(recent_losses)
         return avg_loss < self.config.GROWTH_LOSS_THRESHOLD
     
-    def grow_model(self, current_model, current_step, avg_loss):
+def grow_model(self, current_model, current_step, avg_loss):
         next_size = ModelConfig.GROWTH_PATH[self.current_size_idx + 1]
         
         print(f"\n{'='*60}")
@@ -1183,15 +1168,16 @@ class AIApplication:
         np.random.seed(self.config.SEED)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.config.SEED)
-        if DIRECTML_AVAILABLE:
-            torch.manual_seed(self.config.SEED)
 
         print(f"\n{'='*60}")
         print(f"  AUTONOMOUS PROGRESSIVE GROWTH AI - TRAINING ONLY")
         print(f"{'='*60}")
         print(f"  Starting size : {model_size}")
         print(f"  Growth path   : {' → '.join(ModelConfig.GROWTH_PATH)}")
-        gpu_name = torch_directml.device_name(0) if DIRECTML_AVAILABLE else "N/A"
+        try:
+            gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
+        except Exception:
+            gpu_name = "N/A"
         print(f"  Device        : {self.config.DEVICE} ({self.config.DEVICE_TYPE})")
         print(f"  GPU           : {gpu_name}")
         print(f"  Hidden dim    : {self.config.HIDDEN_DIM}")
@@ -1348,3 +1334,4 @@ if __name__ == "__main__":
     
     app = AIApplication(model_size)
     app.run()
+"""
