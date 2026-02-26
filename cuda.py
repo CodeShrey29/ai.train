@@ -136,8 +136,8 @@ class ModelConfig:
         self.FETCH_DELAY = 2  # 2 seconds between fetches
         self.PREFETCH_TARGET_LINES = 2_000_000  # Initial prefetch
 
-        self.GROWTH_LOSS_THRESHOLD = 3.0
-        self.GROWTH_STABLE_STEPS = 1000
+        self.GROWTH_LOSS_THRESHOLD = 2.8
+        self.GROWTH_STABLE_STEPS = 3000
 
         # Device selection
         if DIRECTML_AVAILABLE:
