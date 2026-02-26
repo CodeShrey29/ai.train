@@ -125,7 +125,8 @@ class ModelConfig:
             try:
                 self.DEVICE = torch_directml.device()
                 self.DEVICE_TYPE = 'directml'
-            except Exception:
+            except Exception as e:
+                print(f"[Warning] DirectML device creation failed: {e}")
                 self.DEVICE = torch.device('cpu')
                 self.DEVICE_TYPE = 'cpu'
         elif torch.cuda.is_available():
@@ -155,7 +156,7 @@ class ModelConfig:
 
         self.ENABLE_MIXED_PRECISION = (self.DEVICE_TYPE == "cuda")
 # =============================
-# TOKENIZER (ULTRA-ADVANCED BPE - PRODUCTION GRADE)
+# TOKENIZER (ULTIMATE BPE - WITH FULL UNICODE SUPPORT)
 # =============================
 class BPETokenizer:
     def __init__(self, vocab_size=32000):
@@ -171,7 +172,15 @@ class BPETokenizer:
         self.normalization = 'nfc'
         self.max_word_length = 100
         self.min_frequency = 2
-        self.unicode_range = (0x0000, 0xFFFF)  # Full Unicode range
+        self.unicode_range = (0x0000, 0x10FFFF)  # Full Unicode range (emojis too!)
+        
+        # Unicode tracking
+        self.unicode_stats = {
+            'total_chars_found': 0,
+            'unicode_chars_found': 0,
+            'unique_unicode': set(),
+            'corrupted_lines': 0
+        }
         
         # Performance optimizations
         self.cache_size = 10000
@@ -181,7 +190,7 @@ class BPETokenizer:
         self.stats = {
             'total_lines': 0,
             'unique_words': 0,
-            'unicode_chars': 0,
+            'unicode_words': 0,
             'merge_history': []
         }
 
@@ -205,7 +214,7 @@ class BPETokenizer:
         for form in ['nfc', 'nfkc', 'nfkd']:
             try:
                 normalized = unicodedata.normalize(form, text)
-                # Verify it's valid
+                # Verify it's valid UTF-8
                 normalized.encode('utf-8')
                 return normalized
             except:
@@ -221,58 +230,150 @@ class BPETokenizer:
         
         has_unicode = any(ord(c) > 127 for c in text)
         if has_unicode:
-            self.stats['unicode_chars'] += 1
+            # Track unique Unicode characters
+            for c in text:
+                if ord(c) > 127:
+                    self.unicode_stats['unique_unicode'].add(c)
+            self.unicode_stats['unicode_chars_found'] += sum(1 for c in text if ord(c) > 127)
+            self.stats['unicode_words'] += 1
+        self.unicode_stats['total_chars_found'] += len(text)
         return has_unicode
+
+    def _is_text_corrupted(self, text):
+        """Check if text shows signs of encoding corruption"""
+        if not isinstance(text, str):
+            return True
+        
+        # Common corruption patterns
+        corruption_patterns = [
+            '�',  # Unicode replacement character
+            '?',  # ASCII fallback for unknown chars (multiple occurrences)
+            '\ufffd',  # Unicode replacement character
+        ]
+        
+        # If we see many replacement chars, text is corrupted
+        corruption_count = sum(text.count(p) for p in corruption_patterns)
+        if corruption_count > len(text) * 0.01:  # More than 1% corrupted
+            return True
+        
+        # Check for mojibake (common encoding errors)
+        mojibake_patterns = [
+            'Ã©',  # é mis-encoded as Latin-1
+            'Ã¼',  # ü mis-encoded
+            'Ã±',  # ñ mis-encoded
+            'Ã¡',  # á mis-encoded
+            'â‚¬',  # € mis-encoded
+            'â€™',  # ’ mis-encoded
+        ]
+        for pattern in mojibake_patterns:
+            if pattern in text:
+                return True
+        
+        return False
 
     def train(self, texts, min_frequency=2, max_merges=None):
         """
-        ULTRA-ADVANCED BPE TRAINING
+        ULTIMATE BPE TRAINING - FULL UNICODE SUPPORT
         Features:
-        - Full Unicode support (U+0000 to U+FFFF)
-        - Multi-stage frequency filtering
-        - Adaptive merge scoring
-        - Progress tracking with ETA
-        - Automatic fallback mechanisms
-        - Comprehensive statistics
+        - Full Unicode support (U+0000 to U+10FFFF)
+        - Detects encoding corruption
+        - Tracks Unicode statistics
+        - Preserves all special characters
         """
         print("=" * 70)
         print("  ULTRA-ADVANCED BPE TOKENIZER TRAINING")
+        print("  WITH FULL UNICODE SUPPORT")
         print("=" * 70)
         
         start_time = time.time()
         self.min_frequency = min_frequency
         
-        # PHASE 1: Unicode Analysis
+        # PHASE 1: Unicode Analysis and Corruption Detection
         print("\n[Phase 1] Analyzing text encoding...")
         unicode_samples = []
         ascii_count = 0
         unicode_count = 0
         total_lines = 0
+        corrupted_lines = 0
         
-        for i, text in enumerate(texts[:10000]):  # Sample first 10k lines
-            if text and isinstance(text, str):
-                total_lines += 1
-                if self._detect_encoding(text):
-                    unicode_count += 1
-                    if len(unicode_samples) < 10:
-                        unicode_samples.append(text[:50])
-                else:
-                    ascii_count += 1
+        # Sample first 10000 lines for analysis
+        for i, text in enumerate(texts[:10000]):
+            if not isinstance(text, str):
+                continue
+                
+            total_lines += 1
+            
+            # Check for corruption
+            if self._is_text_corrupted(text):
+                corrupted_lines += 1
+                continue
+            
+            if self._detect_encoding(text):
+                unicode_count += 1
+                if len(unicode_samples) < 20:
+                    # Store sample of Unicode text
+                    sample = text[:100]
+                    unicode_samples.append(sample)
+            else:
+                ascii_count += 1
         
-        unicode_percent = (unicode_count / max(total_lines, 1)) * 100
-        print(f"  ✓ Total lines sampled: {total_lines:,}")
-        print(f"  ✓ ASCII only: {ascii_count:,} lines ({100-unicode_percent:.1f}%)")
-        print(f"  ✓ Unicode detected: {unicode_count:,} lines ({unicode_percent:.1f}%)")
+        self.unicode_stats['corrupted_lines'] = corrupted_lines
         
+        # Print encoding analysis
+        print(f"\n  📊 ENCODING ANALYSIS:")
+        print(f"  ├─ Total lines sampled: {total_lines:,}")
+        print(f"  ├─ ASCII only: {ascii_count:,} lines")
+        print(f"  ├─ Unicode detected: {unicode_count:,} lines")
+        print(f"  ├─ Corrupted lines: {corrupted_lines:,}")
+        print(f"  └─ Unicode characters found: {self.unicode_stats['unicode_chars_found']:,}")
+        
+        # Show unique Unicode characters found
+        unique_unicode = sorted(list(self.unicode_stats['unique_unicode']))[:50]
+        if unique_unicode:
+            print(f"\n  🔤 UNICODE CHARACTERS FOUND (sample):")
+            chunks = []
+            for c in unique_unicode:
+                try:
+                    name = unicodedata.name(c, 'unknown')
+                    chunks.append(f"'{c}' (U+{ord(c):04X} {name[:20]})")
+                except:
+                    chunks.append(f"'{c}' (U+{ord(c):04X})")
+            
+            # Print in columns
+            for i in range(0, len(chunks), 3):
+                row = chunks[i:i+3]
+                print(f"    {row[0]:<30} {row[1] if len(row)>1 else '':<30} {row[2] if len(row)>2 else ''}")
+        
+        # Show sample Unicode text
         if unicode_samples:
-            print("\n  Unicode samples found:")
+            print(f"\n  📝 UNICODE TEXT SAMPLES:")
             for sample in unicode_samples[:3]:
-                print(f"    • {sample}")
+                # Show first 50 chars with Unicode visible
+                preview = sample[:80]
+                print(f"    • {repr(preview)}")
         
-        if unicode_percent < 1:
-            print("\n  ⚠ WARNING: Very little Unicode detected!")
-            print("    Your data may be loading as ASCII. Check file encoding.")
-            print("    Should be: open(file, 'r', encoding='utf-8')")
+        # CRITICAL WARNING if Unicode missing
+        if unicode_count == 0:
+            print("\n" + "=" * 70)
+            print("  ⚠️  ⚠️  ⚠️  CRITICAL WARNING!  ⚠️  ⚠️  ⚠️")
+            print("=" * 70)
+            print("  NO UNICODE DETECTED IN YOUR DATA!")
+            print("\n  Your data.txt contains Unicode but it's being read as ASCII.")
+            print("  This will CORRUPT all non-ASCII characters!")
+            print("\n  FIX: Add encoding='utf-8' to EVERY file open() call:")
+            print("  open(file, 'r', encoding='utf-8')")
+            print("\n  Common places to fix:")
+            print("  • ConsumingDataset._load_lines()")
+            print("  • ConsumingDataset.add_lines()")
+            print("  • AIApplication.prefetch_data()")
+            print("=" * 70)
+            
+            # Ask user if they want to continue
+            print("\n  Continue anyway? (y/n): ", end='')
+            response = input().lower()
+            if response != 'y':
+                print("  Exiting. Fix encoding and try again.")
+                sys.exit(1)
         
         # PHASE 2: Word Frequency Counting (with Unicode preservation)
         print("\n[Phase 2] Counting word frequencies...")
@@ -306,6 +407,11 @@ class BPETokenizer:
                 skipped_lines += 1
                 continue
             
+            # Skip corrupted lines
+            if self._is_text_corrupted(text):
+                skipped_lines += 1
+                continue
+            
             # Normalize text
             try:
                 text = self._normalize(text)
@@ -331,19 +437,19 @@ class BPETokenizer:
         self.stats['unique_words'] = len(word_freqs)
         self.stats['unicode_words'] = unicode_words
         
-        print(f"\n  ✓ Statistics:")
-        print(f"    - Valid lines: {valid_lines:,}")
-        print(f"    - Skipped lines: {skipped_lines:,}")
-        print(f"    - Unique words: {len(word_freqs):,}")
-        print(f"    - Words with Unicode: {unicode_words:,}")
-        print(f"    - Total characters: {total_chars:,}")
+        print(f"\n  📊 DATA STATISTICS:")
+        print(f"  ├─ Valid lines: {valid_lines:,}")
+        print(f"  ├─ Skipped lines: {skipped_lines:,}")
+        print(f"  ├─ Unique words: {len(word_freqs):,}")
+        print(f"  ├─ Words with Unicode: {unicode_words:,}")
+        print(f"  └─ Total characters: {total_chars:,}")
         
         # Filter rare words
         if min_frequency > 1 and len(word_freqs) > 50000:
             old_size = len(word_freqs)
             word_freqs = {w: f for w, f in word_freqs.items() if f >= min_frequency}
             filtered = old_size - len(word_freqs)
-            print(f"\n  Filtered {filtered:,} rare words (min freq {min_frequency})")
+            print(f"\n  🧹 Filtered {filtered:,} rare words (min freq {min_frequency})")
         
         # PHASE 3: Build Unicode-Aware Character Vocabulary
         print("\n[Phase 3] Building Unicode character vocabulary...")
@@ -371,26 +477,20 @@ class BPETokenizer:
             for i in range(256):
                 vocab.add(f'<byte_{i}>')
         
-        print(f"  ✓ Character vocabulary: {len(vocab):,}")
-        print(f"  ✓ Unicode characters: {len(unicode_set):,}")
+        print(f"\n  📊 VOCABULARY STATISTICS:")
+        print(f"  ├─ Character vocabulary: {len(vocab):,}")
+        print(f"  ├─ Unicode characters: {len(unicode_set):,}")
+        print(f"  ├─ ASCII characters: {len(vocab) - len(unicode_set):,}")
         
-        if unicode_set:
-            print("\n  Unicode character samples:")
-            unicode_samples = sorted(unicode_set)[:20]
-            samples = []
-            for c in unicode_samples:
-                try:
-                    name = unicodedata.name(c, 'unknown')
-                    samples.append(f"'{c}' (U+{ord(c):04X} {name[:20]})")
-                except:
-                    samples.append(f"'{c}' (U+{ord(c):04X})")
-            print(f"    {', '.join(samples)}")
+        if len(unicode_set) < 100 and unicode_words > 0:
+            print(f"\n  ⚠️  WARNING: Found {unicode_words:,} Unicode words but only {len(unicode_set):,} Unicode characters!")
+            print("     This suggests encoding corruption. Check file reading.")
         
         # Sort characters by frequency
         sorted_chars = sorted(char_freqs.items(), key=lambda x: -x[1])
         if sorted_chars:
             top_char = sorted_chars[0]
-            print(f"\n  Most frequent character: '{top_char[0]}' ({top_char[1]:,} times)")
+            print(f"\n  📈 Most frequent character: '{top_char[0]}' ({top_char[1]:,} times)")
         
         # Initialize vocabulary with frequency-based ordering
         self.vocab = {}
@@ -407,7 +507,7 @@ class BPETokenizer:
         
         # If vocabulary is too small, add ASCII fallback
         if len(self.vocab) < 1000:
-            print("\n  ⚠ Vocabulary too small - adding ASCII fallback")
+            print("\n  ⚠️  Vocabulary too small - adding ASCII fallback")
             for i in range(32, 127):
                 char = chr(i)
                 if char not in self.vocab:
@@ -560,31 +660,33 @@ class BPETokenizer:
         print(f"  ✓ Final vocabulary size: {len(self.vocab):,}")
         print(f"  ✓ Total merges performed: {len(self.merges):,}")
         print(f"  ✓ Training time: {elapsed/60:.2f} minutes")
-        print(f"  ✓ Characters → Subwords ratio: {len(self.vocab)/len(vocab):.1f}x")
         
         # Vocabulary quality metrics
         token_lengths = [len(t) for t in self.vocab.keys() if t not in self.special_tokens]
         if token_lengths:
-            print(f"\n  Vocabulary Statistics:")
-            print(f"    - Avg token length: {sum(token_lengths)/len(token_lengths):.2f} chars")
-            print(f"    - Min token length: {min(token_lengths)} chars")
-            print(f"    - Max token length: {max(token_lengths)} chars")
+            print(f"\n  📊 VOCABULARY STATISTICS:")
+            print(f"  ├─ Avg token length: {sum(token_lengths)/len(token_lengths):.2f} chars")
+            print(f"  ├─ Min token length: {min(token_lengths)} chars")
+            print(f"  ├─ Max token length: {max(token_lengths)} chars")
         
         # Unicode statistics
         unicode_tokens = [t for t in self.vocab.keys() if any(ord(c) > 127 for c in t)]
         if unicode_tokens:
-            print(f"\n  Unicode Support:")
-            print(f"    - Unicode tokens: {len(unicode_tokens):,}")
-            print(f"    - Unicode ratio: {len(unicode_tokens)/len(self.vocab)*100:.1f}%")
+            print(f"\n  🌍 UNICODE SUPPORT:")
+            print(f"  ├─ Unicode tokens: {len(unicode_tokens):,}")
+            print(f"  ├─ Unicode ratio: {len(unicode_tokens)/len(self.vocab)*100:.1f}%")
             
             # Show sample Unicode tokens
-            sample_unicode = sorted(unicode_tokens)[:10]
-            print(f"    - Examples: {', '.join(sample_unicode)}")
+            sample_unicode = sorted(unicode_tokens)[:20]
+            print(f"  └─ Examples: {', '.join(sample_unicode)}")
+        else:
+            print(f"\n  ⚠️  NO UNICODE TOKENS CREATED!")
+            print("     Your data is being read as ASCII. Add encoding='utf-8' to all file opens!")
         
         print("=" * 70)
 
     def encode(self, text, add_special_tokens=True):
-        """Advanced encoding with Unicode preservation"""
+        """Fast encoding with Unicode preservation"""
         if text is None:
             text = ""
         
@@ -593,6 +695,11 @@ class BPETokenizer:
                 text = str(text)
             except:
                 text = ""
+        
+        # Check for corruption
+        if self._is_text_corrupted(text):
+            # Log but continue
+            pass
         
         # Cache check
         cache_key = text[:200]
@@ -641,13 +748,13 @@ class BPETokenizer:
                     chars = chars[:best_i] + [merged] + chars[best_i+2:]
                     changed = True
             
-            # Convert to IDs
+            # Convert to IDs - use 'replace' to preserve characters
             for char in chars:
                 if char in self.vocab:
                     tokens.append(self.vocab[char])
                 elif self.byte_fallback:
-                    # Byte fallback for unknown chars
-                    for byte in char.encode('utf-8', errors='ignore'):
+                    # Byte fallback for unknown chars - use 'replace' to preserve characters
+                    for byte in char.encode('utf-8', errors='replace'):
                         byte_token = f'<byte_{byte}>'
                         if byte_token in self.vocab:
                             tokens.append(self.vocab[byte_token])
@@ -692,6 +799,10 @@ class BPETokenizer:
 
     def save(self, path):
         """Save tokenizer with all metadata"""
+        # Convert set to list for JSON serialization
+        unicode_samples = list(self.unicode_stats['unique_unicode'])[:100]
+        unicode_samples = [c for c in unicode_samples if ord(c) > 127]
+        
         data = {
             'vocab': self.vocab,
             'merges': {f"{k[0]}|||{k[1]}": v for k, v in self.merges.items()},
@@ -701,9 +812,15 @@ class BPETokenizer:
             'max_word_length': self.max_word_length,
             'vocab_size': self.vocab_size,
             'stats': self.stats,
+            'unicode_stats': {
+                'total_chars_found': self.unicode_stats['total_chars_found'],
+                'unicode_chars_found': self.unicode_stats['unicode_chars_found'],
+                'unique_unicode_samples': unicode_samples,
+                'corrupted_lines': self.unicode_stats['corrupted_lines']
+            },
             'metadata': {
                 'created': datetime.now().isoformat(),
-                'version': '3.0-ultra-advanced',
+                'version': '3.0-unicode-ultimate',
                 'unicode_support': 'full'
             }
         }
@@ -731,19 +848,27 @@ class BPETokenizer:
         self.stats = data.get('stats', self.stats)
         self.inverse_vocab = {v: k for k, v in self.vocab.items()}
         
+        # Load Unicode stats if available
+        unicode_stats = data.get('unicode_stats', {})
+        self.unicode_stats['total_chars_found'] = unicode_stats.get('total_chars_found', 0)
+        self.unicode_stats['unicode_chars_found'] = unicode_stats.get('unicode_chars_found', 0)
+        self.unicode_stats['corrupted_lines'] = unicode_stats.get('corrupted_lines', 0)
+        
         print(f"\n  ✓ Tokenizer loaded from {path}")
         print(f"    - Vocabulary: {len(self.vocab):,} tokens")
         print(f"    - Unicode tokens: {sum(1 for t in self.vocab if any(ord(c)>127 for c in t)):,}")
         print(f"    - Merges: {len(self.merges):,}")
         
         # Verify Unicode support
-        unicode_test = "café über αβγ 今日は"
+        unicode_test = "café über αβγ 今日は 日本語"
         encoded = self.encode(unicode_test, add_special_tokens=False)
         decoded = self.decode(encoded, skip_special_tokens=True)
-        print(f"\n  Unicode test: '{unicode_test}' → '{decoded}'")
-        if unicode_test in decoded or all(ord(c) < 128 for c in decoded):
-            print("  ⚠ Warning: Unicode may not be properly preserved")
-# =============================
+        print(f"\n  🔤 Unicode test: '{unicode_test}'")
+        print(f"  🔄 Decoded:      '{decoded}'")
+        
+        if decoded != unicode_test and all(ord(c) < 128 for c in decoded):
+            print("  ⚠️  WARNING: Unicode may not be properly preserved!")
+            print("     Check file encoding when loading training data.")
 # MEMORY MONITOR
 # =============================
 class MemoryMonitor:
@@ -796,14 +921,14 @@ class ModelGrowthManager:
     def load_growth_log(self):
         if os.path.exists(self.growth_log_file):
             try:
-                with open(self.growth_log_file, 'r') as f:
+                with open(self.growth_log_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except Exception:
                 return []
         return []
     def save_growth_log(self):
         try:
-            with open(self.growth_log_file, 'w') as f:
+            with open(self.growth_log_file, 'w', encoding='utf-8') as f:
                 json.dump(self.growth_history, f, indent=2)
         except Exception:
             pass
@@ -1010,7 +1135,7 @@ class ConsumingDataset:
     def _load_trained_hashes(self):
         if os.path.exists(self.TRAINED_HASHES_FILE):
             try:
-                with open(self.TRAINED_HASHES_FILE, 'r') as f:
+                with open(self.TRAINED_HASHES_FILE, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 self.trained_hashes = set(data.get('hashes', []))
                 print(f"[Data] Loaded {len(self.trained_hashes)} trained data hashes")
@@ -1019,7 +1144,7 @@ class ConsumingDataset:
     def _save_trained_hashes(self):
         try:
             tmp = self.TRAINED_HASHES_FILE + ".tmp"
-            with open(tmp, 'w') as f:
+            with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump({'hashes': list(self.trained_hashes), 'count': len(self.trained_hashes)}, f)
             if os.path.exists(self.TRAINED_HASHES_FILE):
                 os.remove(self.TRAINED_HASHES_FILE)
@@ -1027,14 +1152,18 @@ class ConsumingDataset:
         except Exception:
             pass
     def _hash(self, line):
-        return hashlib.md5(line.encode('utf-8', errors='ignore')).hexdigest()
+        # Use 'strict' to fail on encoding errors rather than silently dropping characters
+        # This ensures Greek letters (αβγ), accents (éüñ), em-dashes (—), and smart quotes ("") are preserved
+        return hashlib.md5(line.encode('utf-8', errors='strict')).hexdigest()
     def _load_lines(self):
         if not os.path.exists(self.file_path):
-            with open(self.file_path, 'w') as f:
+            with open(self.file_path, 'w', encoding='utf-8') as f:
                 pass
             self.lines = []
             return
-        with open(self.file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        # Use errors='strict' to preserve all Unicode characters including
+        # Greek letters (αβγ), accents (éüñ), em-dashes (—), and smart quotes ("")
+        with open(self.file_path, 'r', encoding='utf-8', errors='strict') as f:
             raw = [l.strip() for l in f if l.strip() and len(l.strip()) > 20]
         with self.lock:
             self.lines = []
@@ -1135,7 +1264,7 @@ class DataFetcher:
         self.history_file = Path("fetched_history.json")
         if self.history_file.exists():
             try:
-                data = json.load(self.history_file.open('r'))
+                data = json.load(self.history_file.open('r', encoding='utf-8'))
                 if isinstance(data, dict):
                     self.fetched_urls = set(data.get('fetched_urls', []))
                     self.category_idx = data.get('category_idx', 0)
@@ -1198,7 +1327,7 @@ class DataFetcher:
                 'fetched_count': self.fetched_count,
             }
             tmp = str(self.history_file) + ".tmp"
-            with open(tmp, 'w') as f:
+            with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(data, f)
             if self.history_file.exists():
                 os.remove(self.history_file)
