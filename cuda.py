@@ -1809,7 +1809,7 @@ class AIApplication:
                 print(f"Bootstrap error: {e}")
             idx += 1
             time.sleep(1)
-                texts = []
+        texts = []
         with open(self.config.DATA_FILE, 'r', encoding='utf-8', errors='ignore') as f:
             for i, line in enumerate(f):
                 if line.strip():
