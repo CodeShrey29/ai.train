@@ -105,6 +105,7 @@ class ModelConfig:
         self.DATA_FILE = "data.txt"
         self.TOKENIZER_FILE = "tokenizer.json"
         self.CHECKPOINT_DIR = "checkpoints"
+        self.MODEL_FILE = "model.pt"
         self.GROWTH_LOG_FILE = "growth_log.json"
 
         # checkpoint pruning: keep this many most recent checkpoints
@@ -114,6 +115,7 @@ class ModelConfig:
         self.MIN_DATA_LINES = 3000
         self.FETCH_BATCH = 10
         self.FETCH_DELAY = 5
+        self.PREFETCH_TARGET_LINES = 2_000_000
 
         self.GROWTH_LOSS_THRESHOLD = 3.0
         self.GROWTH_STABLE_STEPS = 1000
@@ -564,8 +566,12 @@ class ConsumingDataset:
                 self.trained_hashes = set()
     def _save_trained_hashes(self):
         try:
-            with open(self.TRAINED_HASHES_FILE, 'w') as f:
+            tmp = self.TRAINED_HASHES_FILE + ".tmp"
+            with open(tmp, 'w') as f:
                 json.dump({'hashes': list(self.trained_hashes), 'count': len(self.trained_hashes)}, f)
+            if os.path.exists(self.TRAINED_HASHES_FILE):
+                os.remove(self.TRAINED_HASHES_FILE)
+            os.rename(tmp, self.TRAINED_HASHES_FILE)
         except Exception:
             pass
     def _hash(self, line):
@@ -680,6 +686,9 @@ class DataFetcher:
                 data = json.load(self.history_file.open('r'))
                 if isinstance(data, dict):
                     self.fetched_urls = set(data.get('fetched_urls', []))
+                    self.category_idx = data.get('category_idx', 0)
+                    self.fetched_count = data.get('fetched_count', 0)
+                    print(f"[Fetcher] Resumed — {len(self.fetched_urls)} sources already fetched, category_idx={self.category_idx}")
                 else:
                     self.fetched_urls = set(data)
             except Exception:
@@ -731,8 +740,17 @@ class DataFetcher:
 
     def _save_history(self):
         try:
-            with open(self.history_file, 'w') as f:
-                json.dump({'fetched_urls': list(self.fetched_urls)}, f)
+            data = {
+                'fetched_urls': list(self.fetched_urls),
+                'category_idx': self.category_idx,
+                'fetched_count': self.fetched_count,
+            }
+            tmp = str(self.history_file) + ".tmp"
+            with open(tmp, 'w') as f:
+                json.dump(data, f)
+            if self.history_file.exists():
+                os.remove(self.history_file)
+            os.rename(tmp, str(self.history_file))
         except Exception:
             pass
 
@@ -978,60 +996,53 @@ class ContinuousTrainer:
             loss = loss / self.config.GRAD_ACCUMULATION_STEPS
             loss.backward()
         return loss.item() * self.config.GRAD_ACCUMULATION_STEPS
-    def _prune_checkpoints(self, size_tag):
-        # remove older checkpoint files keeping only the newest CHECKPOINT_MAX_KEEP
-        try:
-            files = [f for f in os.listdir(self.config.CHECKPOINT_DIR) if f.startswith(f"checkpoint_{size_tag}_") and f.endswith('.pt')]
-            if not files:
-                return
-            paths = [os.path.join(self.config.CHECKPOINT_DIR, f) for f in files]
-            paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-            keep = self.config.CHECKPOINT_MAX_KEEP
-            for old in paths[keep:]:
-                try:
-                    os.remove(old)
-                    print(f"[Checkpoint] Pruned old checkpoint: {os.path.basename(old)}")
-                except Exception:
-                    pass
-        except Exception:
-            pass
     def save_checkpoint(self, is_growth=False):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        size_tag = self.config.SIZE
-        if is_growth:
-            name = f"checkpoint_{size_tag}_growth_{timestamp}.pt"
-        else:
-            name = f"checkpoint_{size_tag}_step{self.step}_{timestamp}.pt"
-        path = os.path.join(self.config.CHECKPOINT_DIR, name)
-        checkpoint = {'step':self.step,'epoch':self.epoch,'model_state_dict':self.model.state_dict(),'optimizer_state_dict':self.optimizer.state_dict(),'scheduler_state_dict':self.scheduler.state_dict(),'loss_history':self.loss_history[-1000:]}
-        torch.save(checkpoint, path)
-        print(f"[Checkpoint] Saved: {name}")
-        # update latest symlink (best-effort)
-        latest = os.path.join(self.config.CHECKPOINT_DIR, f"latest_{size_tag}.pt")
-        try:
-            if os.path.exists(latest):
-                os.remove(latest)
-            os.symlink(name, latest)
-        except Exception:
-            pass
-        # prune older checkpoints to save disk
-        self._prune_checkpoints(size_tag)
+        """Save model to single model.pt file (overwrites previous)"""
+        checkpoint = {
+            'step': self.step,
+            'epoch': self.epoch,
+            'size': self.config.SIZE,
+            'vocab_size': self.config.VOCAB_SIZE,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'loss_history': self.loss_history[-1000:],
+        }
+        # Backup dedup state inside model.pt
+        if hasattr(self, 'dataset') and self.dataset:
+            checkpoint['trained_hashes'] = list(self.dataset.trained_hashes)
+            checkpoint['trained_count'] = len(self.dataset.trained_hashes)
+        if hasattr(self, 'fetcher') and self.fetcher:
+            checkpoint['fetcher_state'] = {
+                'fetched_urls': list(self.fetcher.fetched_urls),
+                'category_idx': self.fetcher.category_idx,
+                'fetched_count': self.fetcher.fetched_count,
+            }
+        tmp_path = self.config.MODEL_FILE + ".tmp"
+        torch.save(checkpoint, tmp_path)
+        if os.path.exists(self.config.MODEL_FILE):
+            os.remove(self.config.MODEL_FILE)
+        os.rename(tmp_path, self.config.MODEL_FILE)
+        tag = "growth" if is_growth else f"step {self.step}"
+        trained_n = checkpoint.get('trained_count', 0)
+        fetched_n = len(checkpoint.get('fetcher_state', {}).get('fetched_urls', []))
+        print(f"[Save] model.pt updated ({self.config.SIZE}, {tag}) | Dedup: {trained_n:,} trained, {fetched_n:,} fetched")
     def load_checkpoint(self):
-        latest = os.path.join(self.config.CHECKPOINT_DIR, f"latest_{self.config.SIZE}.pt")
-        if os.path.exists(latest):
+        """Load from single model.pt file"""
+        if os.path.exists(self.config.MODEL_FILE):
             try:
-                print(f"Loading checkpoint: {latest}")
-                ckpt = torch.load(latest, map_location='cpu')
+                print(f"Loading model from {self.config.MODEL_FILE}...")
+                ckpt = torch.load(self.config.MODEL_FILE, map_location='cpu', weights_only=False)
                 self.model.load_state_dict(ckpt['model_state_dict'])
                 self.model.to(self.device)
                 self.optimizer.load_state_dict(ckpt['optimizer_state_dict'])
                 self.scheduler.load_state_dict(ckpt['scheduler_state_dict'])
                 self.step = ckpt.get('step', 0)
                 self.loss_history = ckpt.get('loss_history', [])
-                print(f"Resumed from step {self.step}")
+                print(f"Resumed: {self.config.SIZE} at step {self.step:,}")
                 return True
             except Exception as e:
-                print(f"Failed to load checkpoint: {e}")
+                print(f"Failed to load model.pt: {e}")
         return False
     def check_growth_criteria(self):
         if len(self.loss_history) < self.config.GROWTH_STABLE_STEPS:
@@ -1066,6 +1077,7 @@ class ContinuousTrainer:
         self.memory_monitor = MemoryMonitor(self.config.MAX_MEMORY_GB, reserve_bytes=reserve)
         self.memory_monitor.force_cleanup()
         print(f"Growth complete: now training {self.config.SIZE}")
+        self.save_checkpoint(is_growth=True)
         return True
     def train_forever(self, dataset):
         self.dataset = dataset
@@ -1229,22 +1241,134 @@ class AIApplication:
         self.config.VOCAB_SIZE = len(self.tokenizer.vocab)
         self.fetched_urls_bootstrap = temp_fetcher.fetched_urls
     def initialize_model(self):
-        latest_path = os.path.join(self.config.CHECKPOINT_DIR, f"latest_{self.config.SIZE}.pt")
-        if os.path.exists(latest_path):
-            print(f"Found checkpoint for {self.config.SIZE}, will load in trainer")
+        if os.path.exists(self.config.MODEL_FILE):
+            print(f"Found {self.config.MODEL_FILE}, will load {self.config.SIZE} model in trainer")
         else:
-            print(f"No checkpoint for {self.config.SIZE}, creating new model")
+            print(f"No model.pt found, creating new {self.config.SIZE} model")
         self.model = AdvancedTransformer(self.config).to(self.config.DEVICE)
+    def prefetch_data(self):
+        """Aggressively fetch ~2M lines of training data before training begins."""
+        target = self.config.PREFETCH_TARGET_LINES
+        print(f"\n{'='*60}")
+        print(f"  PREFETCH PHASE")
+        print(f"  Target: {target:,} lines of training data")
+        print(f"  Sources: Wikipedia, Gutenberg, Wikisource, Wikiquote")
+        print(f"  Press Ctrl+C to skip and start training early")
+        print(f"{'='*60}\n")
+
+        start_time = time.time()
+
+        existing_lines = 0
+        if os.path.exists(self.config.DATA_FILE):
+            with open(self.config.DATA_FILE, 'r', encoding='utf-8', errors='ignore') as f:
+                existing_lines = sum(1 for line in f if line.strip() and len(line.strip()) > 20)
+
+        if existing_lines >= target:
+            print(f"  Already have {existing_lines:,} lines (>= {target:,}). Skipping prefetch.")
+            return
+
+        print(f"  Existing data: {existing_lines:,} lines")
+        print(f"  Need to fetch: {target - existing_lines:,} more lines\n")
+
+        temp_dataset = ConsumingDataset(self.config.DATA_FILE, None, self.config.MAX_SEQ_LEN)
+        fetcher = DataFetcher(temp_dataset, self.config)
+        if hasattr(self, 'fetched_urls_bootstrap'):
+            fetcher.fetched_urls.update(self.fetched_urls_bootstrap)
+
+        sources = [
+            ("Wikipedia (random)", lambda: fetcher.fetch_wikipedia_random(20)),
+            ("Wikipedia (category)", lambda: fetcher.fetch_wikipedia_category()[0]),
+            ("Wikipedia (vital)", lambda: fetcher.fetch_wikipedia_vital()[0]),
+            ("Wikipedia (search)", lambda: fetcher.fetch_wikipedia_search()[0]),
+            ("Project Gutenberg", lambda: fetcher.fetch_gutenberg()),
+            ("Wikisource", lambda: fetcher.fetch_wikisource()[0]),
+            ("Wikiquote", lambda: fetcher.fetch_wikiquote()),
+            ("Open textbook", lambda: fetcher.fetch_open_textbook()),
+        ]
+
+        round_idx = 0
+        last_print = 0
+
+        try:
+            while temp_dataset.total_lines() < target:
+                src_name, src_fn = sources[round_idx % len(sources)]
+                try:
+                    lines = src_fn()
+                    if lines:
+                        temp_dataset.add_lines(lines)
+                        fetcher.fetched_count += len(lines)
+                except Exception as e:
+                    print(f"  Fetch error ({src_name}): {e}")
+                    round_idx += 1
+                    time.sleep(1)
+                    continue
+
+                current = temp_dataset.total_lines()
+                elapsed = time.time() - start_time
+
+                if elapsed - last_print >= 5 or round_idx % 10 == 0:
+                    rate = current / max(elapsed, 1)
+                    remaining = target - current
+                    eta = remaining / max(rate, 0.1)
+                    pct = current / target * 100
+                    bar_len = 30
+                    filled = int(bar_len * current / target)
+                    bar = '█' * filled + '░' * (bar_len - filled)
+                    print(f"  [{bar}] {pct:5.1f}% | {current:>10,} / {target:,} | "
+                          f"Rate: {rate:.0f}/s | ETA: {eta/60:.0f}min")
+                    last_print = elapsed
+
+                round_idx += 1
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            print(f"\n  Prefetch interrupted by user. Got {temp_dataset.total_lines():,} lines.")
+
+        elapsed = time.time() - start_time
+        final_count = temp_dataset.total_lines()
+        print(f"\n  Prefetch complete: {final_count:,} lines in {elapsed/60:.1f} minutes")
+        print(f"  Average rate: {final_count/max(elapsed,1):.0f} lines/second\n")
+
+        self.fetched_urls_bootstrap = fetcher.fetched_urls
+        fetcher._save_history()
+
     def run(self):
         self.initialize_tokenizer()
+        # Prefetch phase: fetch ~2M lines before training
+        self.prefetch_data()
         self.initialize_model()
         self.dataset = ConsumingDataset(self.config.DATA_FILE, self.tokenizer, self.config.MAX_SEQ_LEN)
         self.fetcher = DataFetcher(self.dataset, self.config)
         if hasattr(self, 'fetched_urls_bootstrap'):
             self.fetcher.fetched_urls.update(self.fetched_urls_bootstrap)
+        # Restore dedup state from model.pt if JSON files are incomplete/missing
+        if os.path.exists(self.config.MODEL_FILE):
+            try:
+                ckpt = torch.load(self.config.MODEL_FILE, map_location='cpu', weights_only=False)
+                backup_hashes = set(ckpt.get('trained_hashes', []))
+                if backup_hashes and len(backup_hashes) > len(self.dataset.trained_hashes):
+                    added = len(backup_hashes) - len(self.dataset.trained_hashes)
+                    self.dataset.trained_hashes.update(backup_hashes)
+                    self.dataset._save_trained_hashes()
+                    self.dataset._load_lines()
+                    print(f"[Dedup] Restored {added:,} trained hashes from model.pt backup")
+                fs = ckpt.get('fetcher_state', {})
+                if fs:
+                    backup_urls = set(fs.get('fetched_urls', []))
+                    if len(backup_urls) > len(self.fetcher.fetched_urls):
+                        added = len(backup_urls) - len(self.fetcher.fetched_urls)
+                        self.fetcher.fetched_urls.update(backup_urls)
+                        self.fetcher.category_idx = max(self.fetcher.category_idx, fs.get('category_idx', 0))
+                        self.fetcher.fetched_count = max(self.fetcher.fetched_count, fs.get('fetched_count', 0))
+                        self.fetcher._save_history()
+                        print(f"[Dedup] Restored {added:,} fetched URLs from model.pt backup")
+                del ckpt
+                gc.collect()
+            except Exception as e:
+                print(f"[Dedup] Could not restore from model.pt: {e}")
         fetcher_thread = threading.Thread(target=self.fetcher.run_forever, daemon=True)
         fetcher_thread.start()
         self.trainer = ContinuousTrainer(self.model, self.tokenizer, self.config, self.growth_manager)
+        self.trainer.fetcher = self.fetcher
         self.trainer.load_checkpoint()
         try:
             self.trainer.train_forever(self.dataset)
@@ -1258,12 +1382,30 @@ class AIApplication:
             print("Checkpoint saved. You can resume anytime with: python train.py")
             print("Goodbye!")
 # ENTRY POINT
+def detect_saved_size(model_file="model.pt"):
+    """Auto-detect model size from existing model.pt on restart."""
+    if os.path.exists(model_file):
+        try:
+            ckpt = torch.load(model_file, map_location='cpu', weights_only=False)
+            size = ckpt.get('size', '10M')
+            step = ckpt.get('step', 0)
+            print(f"[Resume] Found model.pt — Size: {size}, Step: {step:,}")
+            return size
+        except Exception as e:
+            print(f"[Resume] Could not read model.pt: {e}")
+    return None
+
 if __name__ == '__main__':
-    model_size = '10M'
-    if len(sys.argv) > 1:
-        model_size = sys.argv[1]
-    if model_size not in ModelConfig.GROWTH_PATH:
-        print(f"Invalid size. Must be one of: {ModelConfig.GROWTH_PATH}")
+    saved_size = detect_saved_size()
+    if saved_size:
+        model_size = saved_size
+    else:
         model_size = '10M'
+        if len(sys.argv) > 1 and sys.argv[1] in ModelConfig.GROWTH_PATH:
+            model_size = sys.argv[1]
+    
+    print(f"\n  Model: {model_size} ({'Resuming' if saved_size else 'Fresh start'})")
+    print(f"  Saves to: model.pt (auto-overwrite)\n")
+    
     app = AIApplication(model_size)
     app.run()

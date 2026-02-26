@@ -547,6 +547,19 @@ class ChatServer:
 # =============================
 # MAIN
 # =============================
+def detect_saved_size(model_file="model.pt"):
+    """Auto-detect model size from existing model.pt."""
+    if os.path.exists(model_file):
+        try:
+            ckpt = torch.load(model_file, map_location='cpu', weights_only=False)
+            size = ckpt.get('size', '10M')
+            step = ckpt.get('step', 0)
+            print(f"[Resume] Found model.pt — Size: {size}, Step: {step:,}")
+            return size
+        except Exception as e:
+            print(f"[Resume] Could not read model.pt: {e}")
+    return None
+
 def load_model(model_size):
     print(f"\n{'='*60}")
     print(f"  NEURAL AI CHAT SERVER")
@@ -566,20 +579,11 @@ def load_model(model_size):
     tokenizer.load(config.TOKENIZER_FILE)
     config.VOCAB_SIZE = len(tokenizer.vocab)
     
-    # Check for checkpoint
-    checkpoint_path = os.path.join(config.CHECKPOINT_DIR, f"latest_{model_size}.pt")
-    if not os.path.exists(checkpoint_path):
-        print(f"[Error] Checkpoint not found: {checkpoint_path}")
-        print(f"Available model sizes in {config.CHECKPOINT_DIR}:")
-        if os.path.exists(config.CHECKPOINT_DIR):
-            checkpoints = [f for f in os.listdir(config.CHECKPOINT_DIR) if f.startswith('latest_')]
-            if checkpoints:
-                for ckpt in checkpoints:
-                    size = ckpt.replace('latest_', '').replace('.pt', '')
-                    print(f"  - {size}")
-            else:
-                print("  (none found)")
-        print("\nPlease run train.py first or specify a different model size")
+    # Check for model.pt
+    model_file = "model.pt"
+    if not os.path.exists(model_file):
+        print(f"[Error] model.pt not found")
+        print("Please run train.py or ai.py first to train a model")
         sys.exit(1)
     
     # Create model
@@ -591,15 +595,16 @@ def load_model(model_size):
     
     model = AdvancedTransformer(config).to(config.DEVICE)
     
-    # Load checkpoint
-    print(f"Loading checkpoint from {checkpoint_path}...")
-    checkpoint = torch.load(checkpoint_path, map_location=config.DEVICE)
-    model.load_state_dict(checkpoint['model_state'])
+    # Load from model.pt
+    print(f"Loading model from {model_file}...")
+    checkpoint = torch.load(model_file, map_location='cpu', weights_only=False)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(config.DEVICE)
     model.eval()
     
     checkpoint_info = {
         'step': checkpoint.get('step', 0),
-        'loss': checkpoint.get('loss', 'N/A')
+        'loss': checkpoint.get('loss_history', [0])[-1] if checkpoint.get('loss_history') else 'N/A'
     }
     
     print(f"Model loaded successfully!")
@@ -609,16 +614,14 @@ def load_model(model_size):
     return model, tokenizer, config, checkpoint_info
 
 if __name__ == "__main__":
-    # Get model size from command line or use default
-    model_size = "10M"
-    if len(sys.argv) > 1:
-        model_size = sys.argv[1]
-    
-    valid_sizes = ModelConfig.GROWTH_PATH
-    if model_size not in valid_sizes:
-        print(f"Invalid model size: {model_size}")
-        print(f"Valid sizes: {', '.join(valid_sizes)}")
-        sys.exit(1)
+    # Auto-detect model size from model.pt
+    saved_size = detect_saved_size()
+    if saved_size:
+        model_size = saved_size
+    else:
+        model_size = "10M"
+        if len(sys.argv) > 1 and sys.argv[1] in ModelConfig.GROWTH_PATH:
+            model_size = sys.argv[1]
     
     # Load model
     model, tokenizer, config, checkpoint_info = load_model(model_size)
