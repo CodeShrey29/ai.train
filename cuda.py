@@ -1809,12 +1809,13 @@ class AIApplication:
                 print(f"Bootstrap error: {e}")
             idx += 1
             time.sleep(1)
-        texts = []
-with open(self.config.DATA_FILE, 'r', encoding='utf-8', errors='ignore') as f:
-    for i, line in enumerate(f):
-        if line.strip():
-            texts.append(line.strip())
-    print(f"  Loaded {i+1:,} lines for tokenizer training")
+                texts = []
+        with open(self.config.DATA_FILE, 'r', encoding='utf-8', errors='ignore') as f:
+            for i, line in enumerate(f):
+                if line.strip():
+                    texts.append(line.strip())
+            print(f"  Loaded {i+1:,} lines for tokenizer training")
+        
         self.tokenizer = BPETokenizer(vocab_size=self.config.VOCAB_SIZE)
         self.tokenizer.train(texts)
         self.tokenizer.save(self.config.TOKENIZER_FILE)
