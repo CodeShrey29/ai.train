@@ -85,7 +85,7 @@ class ModelConfig:
         self.HEAD_DIM = self.HIDDEN_DIM // self.NUM_HEADS
 
         self.VOCAB_SIZE = 32000
-        self.MAX_SEQ_LEN = 512
+        self.MAX_SEQ_LEN = 1024
         self.DROPOUT = 0.1
         self.BIAS = False
         self.ROPE_THETA = 10000.0
@@ -112,7 +112,7 @@ class ModelConfig:
         self.CHECKPOINT_INTERVAL = 300
         self.CHECKPOINT_MAX_KEEP = 3
         self.FLUSH_INTERVAL = 50
-        self.MIN_DATA_LINES = 3000
+        self.MIN_DATA_LINES = 1000000
         self.FETCH_BATCH = 10
         self.FETCH_DELAY = 5
         self.PREFETCH_TARGET_LINES = 2_000_000
