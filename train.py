@@ -154,10 +154,6 @@ class ModelConfig:
             self.RESERVE_BYTES = 64 * 1024 * 1024
 
         self.ENABLE_MIXED_PRECISION = (self.DEVICE_TYPE == "cuda")
-
-# =============================
-# TOKENIZER (BPE simple)
-# =============================
 # =============================
 # TOKENIZER (ULTIMATE BPE - MAXIMUM QUALITY + GUARANTEED COMPLETION)
 # =============================
@@ -176,9 +172,28 @@ class BPETokenizer:
         self.max_word_length = 100  # Prevent explosion
 
     def _normalize(self, text):
-        """Unicode normalization for consistency"""
+        """Unicode normalization for consistency - with safety checks"""
         import unicodedata
-        return unicodedata.normalize(self.normalization, text)
+        
+        # Safety checks for None or non-string input
+        if text is None:
+            return ""
+        
+        if not isinstance(text, str):
+            try:
+                text = str(text)
+            except:
+                return ""
+        
+        # Handle empty strings
+        if len(text) == 0:
+            return ""
+        
+        try:
+            return unicodedata.normalize(self.normalization, text)
+        except Exception:
+            # Fallback: return text as-is if normalization fails
+            return text
 
     def train(self, texts, min_frequency=2, max_merges=None):
         """
@@ -202,13 +217,39 @@ class BPETokenizer:
         print("\n[Phase 1] Counting word frequencies...")
         word_freqs = {}
         total_chars = 0
+        valid_lines = 0
+        skipped_lines = 0
         
         for i, text in enumerate(texts):
+            # Progress update
             if i % 10000 == 0 and i > 0:
-                print(f"    Processed {i:,} lines, {len(word_freqs):,} unique words...")
+                print(f"    Processed {i:,} lines, {len(word_freqs):,} unique words (skipped {skipped_lines:,} invalid lines)...")
             
-            # Normalize text
-            text = self._normalize(text)
+            # SAFETY: Skip None or invalid input
+            if text is None:
+                skipped_lines += 1
+                continue
+            
+            # SAFETY: Convert to string if needed
+            if not isinstance(text, str):
+                try:
+                    text = str(text)
+                except:
+                    skipped_lines += 1
+                    continue
+            
+            # Skip empty lines
+            if len(text.strip()) == 0:
+                skipped_lines += 1
+                continue
+            
+            # Normalize text (with built-in safety)
+            try:
+                text = self._normalize(text)
+            except Exception:
+                text = str(text)  # Fallback
+            
+            valid_lines += 1
             
             for word in text.strip().split():
                 # Limit word length to prevent pathological cases
@@ -217,6 +258,8 @@ class BPETokenizer:
                 
                 word_freqs[word] = word_freqs.get(word, 0) + 1
                 total_chars += len(word)
+        
+        print(f"  ✓ Processed {valid_lines:,} valid lines, skipped {skipped_lines:,} invalid lines")
         
         # Filter by minimum frequency
         if min_frequency > 1 and len(word_freqs) > 50000:
@@ -245,7 +288,13 @@ class BPETokenizer:
         # Sort characters by frequency for better initial vocabulary
         sorted_chars = sorted(char_freqs.items(), key=lambda x: -x[1])
         print(f"  ✓ Character vocabulary: {len(vocab):,}")
-        print(f"  ✓ Most frequent char: '{sorted_chars[0][0]}' ({sorted_chars[0][1]:,} times)")
+        if sorted_chars:
+            print(f"  ✓ Most frequent char: '{sorted_chars[0][0]}' ({sorted_chars[0][1]:,} times)")
+        else:
+            print(f"  ✓ No characters found - using default vocabulary")
+            # Add default ASCII characters if vocabulary is empty
+            for i in range(32, 127):
+                vocab.add(chr(i))
         
         # Initialize vocabulary with frequency-based ordering
         self.vocab = {}
@@ -258,6 +307,15 @@ class BPETokenizer:
         for char in sorted(set(vocab) - set(self.special_tokens.keys())):
             self.vocab[char] = next_id
             next_id += 1
+        
+        # If vocabulary is still empty, add fallback characters
+        if len(self.vocab) <= len(self.special_tokens):
+            print("  ⚠ Vocabulary too small - adding fallback ASCII characters")
+            for i in range(32, 127):
+                char = chr(i)
+                if char not in self.vocab:
+                    self.vocab[char] = next_id
+                    next_id += 1
         
         # Step 3: Initialize splits as tuples (NO STRING OPERATIONS)
         print("\n[Phase 3] Initializing word splits...")
@@ -272,6 +330,14 @@ class BPETokenizer:
         
         # Calculate target merges (vocab_size - current_size)
         target_merges = self.vocab_size - len(self.vocab)
+        if target_merges <= 0:
+            print(f"  ✓ Vocabulary already at target size: {len(self.vocab):,}")
+            # Build inverse vocabulary and return
+            self.inverse_vocab = {v: k for k, v in self.vocab.items()}
+            elapsed = time.time() - start_time
+            print(f"\n  ✓ Tokenizer training complete in {elapsed:.2f} seconds")
+            return
+            
         max_merges = max_merges or target_merges
         print(f"  Target merges: {max_merges:,} (current vocab: {len(self.vocab):,} → {self.vocab_size:,})")
         
@@ -385,7 +451,6 @@ class BPETokenizer:
         print(f"  ✓ Final vocabulary size: {len(self.vocab):,}")
         print(f"  ✓ Total merges performed: {len(self.merges):,}")
         print(f"  ✓ Training time: {elapsed/60:.2f} minutes")
-        print(f"  ✓ Tokens created: {len(self.vocab) - len(vocab) + len(self.special_tokens):,}")
         
         # Vocabulary quality metrics
         token_lengths = [len(t) for t in self.vocab.keys() if t not in self.special_tokens]
@@ -397,13 +462,26 @@ class BPETokenizer:
 
     def encode(self, text, add_special_tokens=True):
         """Fast encoding with caching"""
+        # Safety check
+        if text is None:
+            text = ""
+        
+        if not isinstance(text, str):
+            try:
+                text = str(text)
+            except:
+                text = ""
+        
         # Check cache first
         cache_key = text[:200]  # Limit cache key size
         if cache_key in self.cache:
             return self.cache[cache_key].copy()
         
         # Normalize text
-        text = self._normalize(text)
+        try:
+            text = self._normalize(text)
+        except:
+            pass  # Use original if normalization fails
         
         tokens = []
         if add_special_tokens:
@@ -437,7 +515,7 @@ class BPETokenizer:
                     tokens.append(self.vocab[char])
                 elif self.byte_fallback:
                     # Fallback to byte encoding for unknown chars
-                    for byte in char.encode('utf-8'):
+                    for byte in char.encode('utf-8', errors='ignore'):
                         tokens.append(self.vocab.get(f'<byte_{byte}>', self.special_tokens['<unk>']))
                 else:
                     tokens.append(self.special_tokens['<unk>'])
@@ -453,6 +531,9 @@ class BPETokenizer:
 
     def decode(self, token_ids, skip_special_tokens=True):
         """Fast decoding"""
+        if not token_ids:
+            return ""
+        
         text = ""
         for tid in token_ids:
             token = self.inverse_vocab.get(tid, '<unk>')
@@ -507,6 +588,7 @@ class BPETokenizer:
         print(f"  ✓ Tokenizer loaded from {path}")
         print(f"  ✓ Vocabulary: {len(self.vocab):,} tokens")
         print(f"  ✓ Merges: {len(self.merges):,}")
+
 # =============================
 # MEMORY MONITOR
 # =============================
