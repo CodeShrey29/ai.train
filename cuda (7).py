@@ -1964,7 +1964,7 @@ def main():
         logger.info(f"✅ Processed {processed} new files")
     
     # Check for data files
-    data_files = glob.glob(f"{config.data_dir}/training_data_*.txt")
+    data_files = glob.glob(f"{config.data_dir}/*.txt")
     if not data_files:
         logger.warning("No training data files found. Please add files to inbox.")
         logger.info(f"   Inbox directory: {config.inbox_dir}")
