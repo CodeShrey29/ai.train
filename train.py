@@ -1,4 +1,4 @@
-I'llbp#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Autonomous Progressive Growth AI Training System
 ADVANCED TRAINING-ONLY VERSION - merged improvements from ai.py
