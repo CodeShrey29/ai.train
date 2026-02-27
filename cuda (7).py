@@ -1884,7 +1884,7 @@ def train_bpe_tokenizer(config: UltraAdvancedConfig, data_manager: AdvancedMulti
     )
     
     # Get all text files for training
-    training_files = glob.glob(f"{config.data_dir}/training_data_*.txt")
+    training_files = glob.glob(f"{config.data_dir}/*.txt")
     
     if not training_files:
         print("❌ No training files found in data directory!")
