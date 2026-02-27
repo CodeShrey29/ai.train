@@ -152,7 +152,7 @@ class ModelConfig:
         # Mixed precision only works reliably with CUDA
         self.ENABLE_MIXED_PRECISION = (self.DEVICE_TYPE == "cuda")
 
-class BPETokenizer:
+ BPETokenizer:
     def __init__(self, vocab_size=32000):
         self.vocab_size = vocab_size
         self.special_tokens = {
