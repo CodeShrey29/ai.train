@@ -4545,7 +4545,8 @@ class UltraAdvancedTrainer:
         # Why fused? PyTorch's fused AdamW kernel runs the optimizer step in a
         # single CUDA kernel launch per parameter group, skipping Python overhead.
         # ~30% faster per step on CUDA. Falls back gracefully if unavailable.
-        use_fused = _has_cuda() and "fused" in torch.optim.AdamW.__init__.__doc__
+        doc = torch.optim.AdamW.__init__.__doc__
+        use_fused = _has_cuda() and doc is not None and "fused" in doc
         optimizer_kwargs = dict(
             lr=config.learning_rate,
             weight_decay=config.weight_decay,
